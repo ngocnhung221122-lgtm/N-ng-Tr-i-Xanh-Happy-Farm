@@ -1,0 +1,216 @@
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+const fishCountEl = document.getElementById('fishCount');
+const bestFishEl = document.getElementById('bestFish');
+const actionBtn = document.getElementById('actionBtn');
+const catchPopup = document.getElementById('catchPopup');
+const catchText = document.getElementById('catchText');
+
+let fishCount = 0;
+let bestFishName = "Chưa có";
+
+// Trạng thái câu cá: 'idle' (đang chờ), 'waiting' (thả mồi), 'bitting' (cá đang cắn phao), 'hooked' (kéo lên)
+let fishingState = 'idle'; 
+let biteTimer = null;
+let waitTimeout = null;
+
+// Danh sách các loại cá có thể câu được
+const fishTypes = [
+    { name: 'Cá Trạch Nhỏ 🐟', chance: 0.5 },
+    { name: 'Cá Chép Vàng 🐠', chance: 0.3 },
+    { name: 'Cá Hột Xoàn Ánh Trăng 🌟🐟', chance: 0.15 },
+    { name: 'Cá Voi Mini Thần Tiên 🐋✨', chance: 0.05 }
+];
+
+// Hiệu ứng hạt (sao băng & gợn sóng)
+let stars = Array(20).fill(0).map(() => ({
+    x: Math.random() * canvas.width,
+    y: Math.random() * (canvas.height / 2),
+    size: Math.random() * 2 + 1,
+    alpha: Math.random()
+}));
+
+let ripples = [];
+
+// --- ÂM THANH WEB AUDIO API (Nhạc nền sóng nước + tiếng chuông gió) ---
+let audioCtx = null;
+let isAudioPlaying = false;
+let ambientInterval = null;
+
+function initAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+}
+
+function playSound(type) {
+    initAudio();
+    if (!audioCtx) return;
+    let now = audioCtx.currentTime;
+    let osc = audioCtx.createOscillator();
+    let gain = audioCtx.createGain();
+    
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    if (type === 'cast') {
+        // Tiếng thả cần vút nhẹ
+        osc.frequency.setValueAtTime(300, now);
+        osc.frequency.exponentialRampToValueAtTime(150, now + 0.3);
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.linearRampToValueAtTime(0.01, now + 0.3);
+        osc.start(now);
+        osc.stop(now + 0.3);
+    } else if (type === 'bite') {
+        // Tiếng chuông báo cá cắn câu
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(880, now); // A5
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.linearRampToValueAtTime(0.01, now + 0.2);
+        osc.start(now);
+        osc.stop(now + 0.2);
+    } else if (type === 'success') {
+        // Âm thanh reo vui nhẹ nhàng khi thu phục cá
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(523.25, now);
+        osc.frequency.setValueAtTime(659.25, now + 0.1);
+        osc.frequency.setValueAtTime(783.99, now + 0.2);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.linearRampToValueAtTime(0.01, now + 0.35);
+        osc.start(now);
+        osc.stop(now + 0.35);
+    }
+}
+
+// Tiếng suối/sóng nước du dương chạy ngầm
+function startAmbientSound() {
+    initAudio();
+    if (isAudioPlaying) return;
+    isAudioPlaying = true;
+    document.getElementById('audioBtn').innerText = '🔇 Tắt Âm Thanh Hồ Nước';
+
+    const pentatonic = [261.63, 293.66, 329.63, 392.00, 440.00]; // C D E G A
+    ambientInterval = setInterval(() => {
+        if (!audioCtx) return;
+        let note = pentatonic[Math.floor(Math.random() * pentatonic.length)];
+        let osc = audioCtx.createOscillator();
+        let gain = audioCtx.createGain();
+        let now = audioCtx.currentTime;
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(note, now);
+        gain.gain.setValueAtTime(0.02, now);
+        gain.gain.linearRampToValueAtTime(0.001, now + 2.0);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now);
+        osc.stop(now + 2.0);
+    }, 2500);
+}
+
+function stopAmbientSound() {
+    isAudioPlaying = false;
+    clearInterval(ambientInterval);
+    document.getElementById('audioBtn').innerText = '🎵 Bật Âm Thanh Hồ Nước';
+}
+
+document.getElementById('audioBtn').addEventListener('click', () => {
+    if (isAudioPlaying) stopAmbientSound();
+    else startAmbientSound();
+});
+
+// --- LOGIC CÂU CÁ ---
+actionBtn.addEventListener('click', handleFishingAction);
+canvas.addEventListener('click', handleFishingAction);
+
+function handleFishingAction() {
+    if (fishingState === 'idle') {
+        // Thả cần
+        playSound('cast');
+        fishingState = 'waiting';
+        actionBtn.innerText = "⏳ Đang Chờ Cá Cắn Câu...";
+        actionBtn.style.background = "#546e7a";
+
+        // Random từ 2 đến 5 giây thì cá cắn câu
+        let waitTime = 2000 + Math.random() * 3000;
+        waitTimeout = setTimeout(() => {
+            fishingState = 'bitting';
+            playSound('bite');
+            actionBtn.innerText = "🎣 KÉO LÊN NGAY! (Cá Đang Cắn)";
+            actionBtn.style.background = "#e53935"; // Đổi màu đỏ báo hiệu
+        }, waitTime);
+
+    } else if (fishingState === 'waiting') {
+        // Kéo lên sớm quá -> mất mồi/hụt
+        clearTimeout(waitTimeout);
+        showPopup("Kéo sớm quá, cá sợ chạy mất rồi! 💨");
+        resetFishing();
+
+    } else if (fishingState === 'bitting') {
+        // Kéo lên đúng lúc -> Bắt được cá!
+        playSound('success');
+        let caughtFish = getRandomFish();
+        fishCount++;
+        fishCountEl.innerText = fishCount;
+        bestFishName = caughtFish.name;
+        bestFishEl.innerText = bestFishName;
+
+        showPopup(`Tuyệt vời! Bạn câu được: ${caughtFish.name} 🎉`);
+        
+        // Tạo gợn sóng hiệu ứng mặt nước
+        ripples.push({ x: 200, y: 300, radius: 10, alpha: 1 });
+
+        resetFishing();
+    }
+}
+
+function getRandomFish() {
+    let rand = Math.random();
+    let cumulative = 0;
+    for (let fish of fishTypes) {
+        cumulative += fish.chance;
+        if (rand <= cumulative) return fish;
+    }
+    return fishTypes[0];
+}
+
+function resetFishing() {
+    fishingState = 'idle';
+    actionBtn.innerText = "🎣 Thả Cần Câu";
+    actionBtn.style.background = "linear-gradient(135deg, #00897b, #00796b)";
+}
+
+function showPopup(text) {
+    catchText.innerText = text;
+    catchPopup.classList.remove('hidden');
+    setTimeout(() => {
+        catchPopup.classList.add('hidden');
+    }, 2500);
+}
+
+// --- VÒNG LẶP ĐỒ HỌA 2D ---
+function update() {
+    // Cập nhật hiệu ứng sao lấp lánh
+    stars.forEach(s => {
+        s.alpha += (Math.random() - 0.5) * 0.05;
+        if (s.alpha < 0.1) s.alpha = 0.1;
+        if (s.alpha > 1) s.alpha = 1;
+    });
+
+    // Cập nhật gợn sóng
+    for (let i = ripples.length - 1; i >= 0; i--) {
+        let r = ripples[i];
+        r.radius += 1.5;
+        r.alpha -= 0.03;
+        if (r.alpha <= 0) ripples.splice(i, 1);
+    }
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // 1. Vẽ bầu trời đêm gradient
+    let skyGrad = ctx.createLinearGradient(0, 0, 0, 300);
+    skyGrad.addColorStop(0, '#0a0f
